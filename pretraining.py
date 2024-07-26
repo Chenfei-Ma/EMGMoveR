@@ -17,7 +17,6 @@ if __name__ == '__main__':
     parser.add_argument('--datasets', type=str, help='select datasets', required=True)
     parser.add_argument('--prep', type=str, help='select preprocessing', required=True)
     args = parser.parse_args()
-
     MODEL_NAME = args.model
     DATASET_NAME = args.datasets
     # endregion AP setup
@@ -51,6 +50,7 @@ if __name__ == '__main__':
     DEVICE_IDS = list(map(int, (cp_model.get('training', 'device_ids').split(','))))
     EPOCH_NUM = cp_model.getint('training', 'epoch_num')
     BATCH_SIZE = cp_model.getint('training', 'batch_size')
+    TEST_BATCH_SIZE = cp_model.getint('training', 'test_batch_size')
     SLIDING_WIN_SIZE = cp_model.getint('training', 'win_size')
     SLIDING_WIN_STRIDE = cp_model.getint('training', 'win_stride')
     LR = cp_model.getfloat('training', 'lr')
@@ -63,7 +63,9 @@ if __name__ == '__main__':
     HIDDEN_LAYERS = list(map(int, (cp_model.get('network', 'hidden_layers').split(','))))
     KERNEL_SIZE = cp_model.getint('network', 'kernel_size')
     DROP_PROB = cp_model.getfloat('network', 'drop_prob')
+
     if MODEL_NAME == 'Disentanglement':
+        from Models.Disentanglement import DEM as selected_model
         from Training.Training import train_epoch_dem as train
         from Testing.Testing import test_epoch_dem as test
         criterion = {
@@ -71,12 +73,25 @@ if __name__ == '__main__':
             "trip_criterion": nn.TripletMarginLoss(margin=0.3).cuda(),
             "clf_criterion": torch.nn.CrossEntropyLoss().cuda(),
         }
+
     elif MODEL_NAME == 'AttentionTCN':
+        from Models.AttentionTCN import AttentionTCN as selected_model
         from Training.Training import train_epoch as train
         from Testing.Testing import test_epoch as test
+        criterion = nn.CrossEntropyLoss().cuda()
+
     elif MODEL_NAME == 'TCN':
+        from Models.TCN import TCN as selected_model
         from Training.Training import train_epoch as train
         from Testing.Testing import test_epoch as test
+        criterion = nn.CrossEntropyLoss().cuda()
+
+    elif MODEL_NAME == 'MetaTCN':
+        from Models.TCN import TCN as selected_model
+        from Training.Training import train_meta_epoch as train
+        from Testing.Testing import test_epoch as test
+        criterion = nn.CrossEntropyLoss().cuda()
+
     else:
         raise Exception("Unknown Model")
     # endregion
@@ -118,7 +133,7 @@ if __name__ == '__main__':
             DB_TRAIN[key] = [v for v in DB_TRAIN[key] if v != value]
             DB_TEST = {key:[value]}
 
-            # region load the leave-one-out dataset
+            # region load the training dataset
             train_dataset = Dataset(root_dir=ROOT_DIR,
                                     buf_dir=BUF_DIR,
                                     db_subjects=DB_TRAIN,
@@ -134,7 +149,7 @@ if __name__ == '__main__':
             train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True, num_workers=4, pin_memory=True, prefetch_factor=2)
             # endregion
 
-            # region load the left one dataset
+            # region load the test dataset
             valid_test_dataset = Dataset(root_dir=ROOT_DIR,
                                    buf_dir=BUF_DIR,
                                    db_subjects=DB_TEST,
@@ -147,37 +162,26 @@ if __name__ == '__main__':
                                    low_cut=LOW_CUT,
                                    high_cut=HIGH_CUT,
                                    filter_order=FILTER_ORDER)
-            valid_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[0, 0.5])
+            valid_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[0, 1/10])
             valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
-                                                       batch_size=BATCH_SIZE,
-                                                       shuffle=False,
+                                                       batch_size=TEST_BATCH_SIZE,
+                                                       shuffle=True,
                                                        drop_last=True,
                                                        num_workers=4,
                                                        pin_memory=True,
                                                        prefetch_factor=2)
-            test_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[0.5, 1])
+            test_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[1/10, 1])
             test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
-                                                      batch_size=BATCH_SIZE,
+                                                      batch_size=TEST_BATCH_SIZE,
                                                       shuffle=False,
-                                                      drop_last=True,
+                                                      drop_last=False,
                                                       num_workers=4,
                                                       pin_memory=True,
                                                       prefetch_factor=2)
             # endregion
 
             # region Model loading
-            if MODEL_NAME == 'Disentanglement':
-                from Models.Disentanglement import DEM
-                model = DEM(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            elif MODEL_NAME == 'AttentionTCN':
-                from Models.AttentionTCN import AttentionTCN
-                model = AttentionTCN(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            elif MODEL_NAME == 'TCN':
-                from Models.TCN import TCN
-                model = TCN(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            else:
-                raise Exception("Unknown Model")
-
+            model = selected_model(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
             model = model.to(device)
             if torch.cuda.device_count() > 1:
                 model = nn.DataParallel(model, device_ids=DEVICE_IDS)
@@ -188,34 +192,27 @@ if __name__ == '__main__':
             scheduler = lr_scheduler.StepLR(optimiser, LR_STEP_SIZE, LR_GAMMA)
             # endregion
 
-            # region loss deploy & Training & Testing function
-            loss_cl = nn.CrossEntropyLoss().cuda()
-            # endregion loss deploy
-
-            # region training get a new run name and specific config
+            # region wandb init
             RUNNAME = str(uuid.uuid4())
             CONFIG = {**cp_datasets.__dict__['_sections'].copy(), **cp_prep.__dict__['_sections'].copy(), **cp_model.__dict__['_sections'].copy()}
             CONFIG.update({'runsinfo' : {'test_subject': key+'-'+str(value),
                                         'model_name': MODEL_NAME,
                                         }})
-            # endregion
-
-            # region wandb init
             wandb.init(project="MoveR", name=RUNNAME, config=CONFIG)
             # endregion
 
             # region Training & Validation
             best_record = {'train_loss': 10, 'train_acc': 0, 'valid_loss': 10, 'valid_acc': 0}
             for epoch in range(EPOCH_NUM):
-                train_loss, train_acc = train(model, device, train_loader, loss_cl, optimiser)
+                train_loss, train_acc = train(model, device, train_loader, criterion, optimiser)
                 train_loss = train_loss / (len(train_loader) * BATCH_SIZE)
                 train_acc = train_acc / (len(train_loader) * BATCH_SIZE)
                 print("Epoch:{}/{} AVG Training Loss:{:.3f} Acc {:.2f} ".format(epoch + 1, EPOCH_NUM, train_loss, train_acc))
                 wandb.log({"train_acc": train_acc, "train_loss": train_loss})
 
-                valid_loss, valid_acc = test(model, device, valid_loader, loss_cl)
-                valid_loss = valid_loss / (len(valid_loader) * BATCH_SIZE)
-                valid_acc = valid_acc / (len(valid_loader) * BATCH_SIZE)
+                valid_loss, valid_acc = test(model, device, valid_loader, criterion)
+                valid_loss = valid_loss / (len(valid_loader) * TEST_BATCH_SIZE)
+                valid_acc = valid_acc / (len(valid_loader) * TEST_BATCH_SIZE)
                 print("Epoch:{}/{} AVG Validation Loss:{:.3f} Acc {:.2f} ".format(epoch + 1, EPOCH_NUM, valid_loss, valid_acc))
                 wandb.log({"valid_acc": valid_acc, "valid_loss": valid_loss})
 
@@ -232,18 +229,7 @@ if __name__ == '__main__':
             #endregion
 
             # region Model reloading
-            if MODEL_NAME == 'Disentanglement':
-                from Models.Disentanglement import DEM
-                model = DEM(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            elif MODEL_NAME == 'AttentionTCN':
-                from Models.AttentionTCN import AttentionTCN
-                model = AttentionTCN(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            elif MODEL_NAME == 'TCN':
-                from Models.TCN import TCN
-                model = TCN(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
-            else:
-                raise Exception("Unknown Model")
-
+            model = selected_model(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
             model = model.to(device)
             if torch.cuda.device_count() > 1:
                 model = nn.DataParallel(model, device_ids=DEVICE_IDS)
@@ -256,12 +242,11 @@ if __name__ == '__main__':
             # endregion
 
             # region Test
-            test_loss, test_acc = test(model, device, test_loader, loss_cl)
-            test_loss = test_loss / (len(test_loader) * BATCH_SIZE)
-            test_acc = test_acc / (len(test_loader) * BATCH_SIZE)
+            test_loss, test_acc = test(model, device, test_loader, criterion)
+            test_loss = test_loss / (len(test_loader) * TEST_BATCH_SIZE)
+            test_acc = test_acc / (len(test_loader) * TEST_BATCH_SIZE)
             print("Test Loss: {:.4f} Test Acc: {:.3f}".format(test_loss, test_acc))
             wandb.log({"test_acc": test_acc, "test_loss": test_loss})
-
             # endregion
 
             # region wandb ends

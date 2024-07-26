@@ -61,7 +61,7 @@ class AttentionTCN(nn.Module):
 if __name__ == "__main__":
     input_channels = 126
     input_length = 512
-    ATCN = AttentionTCN(input_length, input_channels, 11, [32,16,8], 0.5)
+    ATCN = AttentionTCN(input_length, input_channels, 11, [32,16], 0.5)
     emg_tensor = torch.randn([16, 126, 512])
     classification = ATCN(emg_tensor)
     print(classification.shape)
