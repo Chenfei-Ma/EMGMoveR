@@ -14,7 +14,7 @@ if __name__ == '__main__':
     # region AP setup
     parser = ArgumentParser()
     parser.add_argument('--model', type=str, help='select model', required=True)
-    parser.add_argument('--datasets', type=str, help='select datasets', required=True)
+    parser.add_argument('--subject', type=str, help='select subject', required=True)
     parser.add_argument('--prep', type=str, help='select preprocessing', required=True)
     args = parser.parse_args()
     MODEL_NAME = args.model
@@ -125,13 +125,13 @@ if __name__ == '__main__':
         del pre_load_dataset
     # endregion
 
-    for db, sub_list in DB.items():
+    for key, int_list in DB.items():
 
-        for sub in sub_list:
+        for value in int_list:
 
             DB_TRAIN = DB.copy()
-            DB_TRAIN[db] = [v for v in DB_TRAIN[db] if v != sub]
-            DB_TEST = {db:[sub]}
+            DB_TRAIN[key] = [v for v in DB_TRAIN[key] if v != value]
+            DB_TEST = {key:[value]}
 
             # region load the training dataset
             train_dataset = Dataset(root_dir=ROOT_DIR,
@@ -162,8 +162,6 @@ if __name__ == '__main__':
                                    low_cut=LOW_CUT,
                                    high_cut=HIGH_CUT,
                                    filter_order=FILTER_ORDER)
-            valid_test_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[0, 46]) # aligned with VF dataset
-
             valid_dataset = SubsetDataset(valid_test_dataset, [0, 1, 2, 3, 4, 5],[0, 1/10])
             valid_loader = torch.utils.data.DataLoader(dataset=valid_dataset,
                                                        batch_size=TEST_BATCH_SIZE,
@@ -182,16 +180,7 @@ if __name__ == '__main__':
                                                       prefetch_factor=2)
             # endregion
 
-            # region wandb init
-            RUNNAME = str(uuid.uuid4())
-            CONFIG = {**cp_datasets.__dict__['_sections'].copy(), **cp_prep.__dict__['_sections'].copy(), **cp_model.__dict__['_sections'].copy()}
-            CONFIG.update({'runsinfo' : {'test_subject': str(DB_TEST),
-                                        'model_name': MODEL_NAME,
-                                        }})
-            wandb.init(project="MoveR-NonGrouping", name=RUNNAME, config=CONFIG)
-            # endregion
-
-            # region Model Creating
+            # region Model loading
             model = selected_model(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
             model = model.to(device)
             if torch.cuda.device_count() > 1:
@@ -203,8 +192,17 @@ if __name__ == '__main__':
             scheduler = lr_scheduler.StepLR(optimiser, LR_STEP_SIZE, LR_GAMMA)
             # endregion
 
-            # region Training
-            best_record = {'train_loss': 10, 'train_acc': 0}
+            # region wandb init
+            RUNNAME = str(uuid.uuid4())
+            CONFIG = {**cp_datasets.__dict__['_sections'].copy(), **cp_prep.__dict__['_sections'].copy(), **cp_model.__dict__['_sections'].copy()}
+            CONFIG.update({'runsinfo' : {'test_subject': key+'-'+str(value),
+                                        'model_name': MODEL_NAME,
+                                        }})
+            wandb.init(project="MoveR", name=RUNNAME, config=CONFIG)
+            # endregion
+
+            # region Training & Validation
+            best_record = {'train_loss': 10, 'train_acc': 0, 'valid_loss': 10, 'valid_acc': 0}
             for epoch in range(EPOCH_NUM):
                 train_loss, train_acc = train(model, device, train_loader, criterion, optimiser)
                 train_loss = train_loss / (len(train_loader) * BATCH_SIZE)
@@ -212,25 +210,30 @@ if __name__ == '__main__':
                 print("Epoch:{}/{} AVG Training Loss:{:.3f} Acc {:.2f} ".format(epoch + 1, EPOCH_NUM, train_loss, train_acc))
                 wandb.log({"train_acc": train_acc, "train_loss": train_loss})
 
-                if train_acc > best_record['train_acc'] and train_loss <= best_record['train_loss']:
+                valid_loss, valid_acc = test(model, device, valid_loader, criterion)
+                valid_loss = valid_loss / (len(valid_loader) * TEST_BATCH_SIZE)
+                valid_acc = valid_acc / (len(valid_loader) * TEST_BATCH_SIZE)
+                print("Epoch:{}/{} AVG Validation Loss:{:.3f} Acc {:.2f} ".format(epoch + 1, EPOCH_NUM, valid_loss, valid_acc))
+                wandb.log({"valid_acc": valid_acc, "valid_loss": valid_loss})
+
+                if valid_acc > best_record['valid_acc'] and valid_loss <= best_record['valid_loss']:
                     best_record['train_acc'] = train_acc
                     best_record['train_loss'] = train_loss
+                    best_record['valid_acc'] = valid_acc
+                    best_record['valid_loss'] = valid_loss
                     torch.save(model.state_dict(), SAVE_DIR + RUNNAME + f'_pretraining.pth')
                     print('- pretrained model saved')
                 scheduler.step()
-            print("Best Train Loss: {:.4f} Train Acc: {:.3f}".format(best_record['train_loss'], best_record['train_acc']))
+            print("Best Train Loss: {:.4f} Train Acc: {:.3f} Valid Loss: {:.4f} Valid Acc: {:.3f}".format(
+                best_record['train_loss'], best_record['train_acc'], best_record['valid_loss'], best_record['valid_acc']))
             #endregion
 
-            # region Validating
-            # endregion
-
-
-            # region Test
             # region Model reloading
             model = selected_model(input_length=SLIDING_WIN_SIZE, input_channels=INPUT_CHANNEL, kernel_size=KERNEL_SIZE, hidden_layers=HIDDEN_LAYERS, dropout=DROP_PROB)
             model = model.to(device)
             if torch.cuda.device_count() > 1:
                 model = nn.DataParallel(model, device_ids=DEVICE_IDS)
+
             if os.path.exists(SAVE_DIR + RUNNAME + f'_pretraining.pth'):
                 model.load_state_dict(torch.load(SAVE_DIR + RUNNAME + f'_pretraining.pth', map_location=device))
                 print(f'pretraining model loaded')
@@ -238,6 +241,7 @@ if __name__ == '__main__':
                 raise OSError('There is no pretraining model exisiting at' + SAVE_DIR + ' with run name ' + RUNNAME)
             # endregion
 
+            # region Test
             test_loss, test_acc = test(model, device, test_loader, criterion)
             test_loss = test_loss / (len(test_loader) * TEST_BATCH_SIZE)
             test_acc = test_acc / (len(test_loader) * TEST_BATCH_SIZE)

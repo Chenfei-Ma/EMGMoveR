@@ -1,5 +1,6 @@
 from torch.utils.data import Dataset, DataLoader
 import os, pickle
+from scipy.signal import resample
 from Preprocessing.Filtering import EMGFilter
 from Preprocessing.Features import *
 from Preprocessing.Augmentation import Densifing
@@ -13,7 +14,6 @@ class Dataset(Dataset):
 
         if not os.path.exists(buf_dir):
             os.mkdir(buf_dir)
-
         self.features = []
         self.labels = []
         self.ids = []
@@ -71,7 +71,8 @@ class Dataset(Dataset):
                             else:
                                 continue
                         elif db_name == 'Database_SCE' or db_name == 'Database_LP':
-                            block_emg = np.load(block_dir + 'data.npy')[:, np.r_[0:10, 11:16], -2000:]
+                            # block_emg = np.load(block_dir + 'data.npy')[:, np.r_[0:10, 11:16], -2000:]   #[0,8,1,9,2,3,11,4,12,5,13,6,14,7,15]
+                            block_emg = np.load(block_dir + 'data.npy')[:, [0,8,1,9,2,3,11,4,12,5,13,6,14,7,15], -2000:]
                         else:
                             block_emg = np.load(block_dir + 'data.npy')[:, :, -2000:]
                         block_lb = np.load(block_dir + 'label.npy')
@@ -84,9 +85,20 @@ class Dataset(Dataset):
 
                     sub_emg = np.hstack(sub_emg.copy())
                     sub_lb = np.hstack(sub_lb.copy())
+                    original_channels = np.linspace(0, 1, num=sub_emg.shape[0])
+                    target_channels = np.linspace(0, 1, num=21)
+                    interpolated_data = np.array([np.interp(target_channels, original_channels, sub_emg[:, t]) for t in range(sub_emg.shape[1])])
+                    sub_emg = interpolated_data.T
+                    sub_emg = EMGFilter(sub_emg, low_cut, high_cut, filter_order)
                     print('--data selected')
 
-                    sub_emg = EMGFilter(sub_emg, low_cut, high_cut, filter_order)
+                    # from Utility.ChannelPlot import singleplot
+                    # from matplotlib import pyplot as plt
+                    # singleplot(sub_emg,sub_lb,2000,str(sub))
+                    # plt.show()
+
+                    sub_emg = resample(sub_emg, sub_emg.shape[1]//2, axis=1)
+                    sub_lb = sub_lb[::2]
                     upperbound = np.quantile(sub_emg, 0.999995, axis=-1)
                     upperbound_expanded = np.expand_dims(upperbound, axis=-1)
                     upperbound_expanded = np.repeat(upperbound_expanded, sub_emg.shape[-1], axis=-1)
@@ -98,12 +110,6 @@ class Dataset(Dataset):
 
                     feature = []
                     label = []
-                    # for i in np.unique(sub_lb):
-                    #     emg = np.squeeze(sub_emg[:, np.where(sub_lb == i)].copy())
-                    #     ft = np.hstack([Normalise(globals()[f](emg, feature_win_size, feature_win_stride)[:, None, :]) for f in feature_set])
-                    #     lb = np.array([i] * ft.shape[-1])
-                    #     feature.append(ft.copy())
-                    #     label.append(lb.copy())
                     for f in feature_set:
                         fts = []
                         lbs = []
@@ -136,20 +142,28 @@ class Dataset(Dataset):
                 db_labels.append(sub_labels)
                 db_ids.append(sub_ids)
 
-            db_features = np.concatenate(db_features, axis=-1)
-            db_labels = np.concatenate(db_labels, axis=-1)
-            db_ids = np.concatenate(db_ids, axis=-1)
-            if db_features.shape[0] < 21 * len(feature_set):
-                padding_channels = 21 * len(feature_set) - db_features.shape[0]
-                db_features = np.pad(db_features, ((0, padding_channels), (0, 0)), mode='constant', constant_values=0)
+            if len(db_ids) > 0:
+                db_features = np.concatenate(db_features, axis=-1)
+                db_labels = np.concatenate(db_labels, axis=-1)
+                db_ids = np.concatenate(db_ids, axis=-1)
             else:
-                db_features = db_features
+                db_features = np.array([])
+                db_labels = np.array([])
+                db_ids = np.array([])
+            # if db_features.shape[0] < 21 * len(feature_set):
+            #     padding_channels = 21 * len(feature_set) - db_features.shape[0]
+            #     db_features = np.pad(db_features, ((0, padding_channels), (0, 0)), mode='constant', constant_values=0)
+            # else:
+            #     db_features = db_features
             print('Data Concatenate')
 
             self.features.append(db_features)
             self.labels.append(db_labels)
             self.ids.append(db_ids)
 
+        self.features = [f for f in self.features if f.size > 0]
+        self.ids = [i for i in self.ids if i.size > 0]
+        self.labels = [l for l in self.labels if l.size > 0]
         self.features = np.concatenate(self.features, axis=-1)
         self.ids = np.concatenate(self.ids, axis=-1)
         self.labels = np.concatenate(self.labels, axis=-1)
@@ -176,13 +190,12 @@ class Dataset(Dataset):
     def __getitem__(self, index):
         return self.features[..., self.win_idx[index][0]:self.win_idx[index][1]], np.squeeze(self.win_lb[index]), np.squeeze(self.win_id[index])
 
-
 if __name__ == '__main__':
     train_dataset = Dataset(root_dir='/home/eric/Database/',
                             buf_dir='/home/eric/Database/.saved_buf_mover/',
                             db_subjects={'Database_VFN': ['0','1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19'],
                                          'Database_SCE': ['18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45'],
-                                         'Database_BLDN': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'],
+                                         'Database_BLDN': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'], #
                                          'Database_LP': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19']},
                             movements=['rest','power','lateral','tripod','pointer','open'],
                             feature_set=['WL', 'LV', 'SSC', 'SKW', 'MNF', 'PKF'],

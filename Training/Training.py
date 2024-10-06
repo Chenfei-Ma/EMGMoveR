@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 from Utility.SamplePairing import SamplePairing, CrossSamplePairing
+import numpy as np
 
 def train_epoch(model, device, dataloader, loss_fn, optimiser):
     train_loss = 0.0
@@ -81,50 +82,51 @@ def train_epoch_vae(model, device, dataloader, loss_re, loss_cl, optimiser):
 
     return train_loss, train_correct
 
-def train_meta_epoch(model, device, dataloader, loss_fn, optimiser, inner_steps=1, inner_lr=0.01):
+def train_meta_epoch(model, device, dataloader, loss_fn, meta_optimiser, inner_steps=1, inner_lr=0.01):
     train_loss = 0.0
     train_correct = 0
     model.train()
 
-    meta_params = {name: param.clone() for name, param in model.named_parameters()}
+    meta_optimiser.zero_grad()
 
-    for i, (inputs, label, id) in enumerate(tqdm(dataloader)):
-        inputs, label = inputs.to(device), label.to(device)
-        label = label.to(torch.int64)
+    for task_id in np.unique(dataloader.dataset.win_lb): #set(dataloader.dataset.win_lb)  # 假设dataloader.dataset.targets包含所有id
+        task_loss = 0.0
+        task_correct = 0
+        task_samples = [(inputs, label) for inputs, label, id in dataloader if id == [task_id]]
 
-        # Inner loop: Task-specific updates
-        task_params = {name: param.clone() for name, param in model.named_parameters()}
+        # 内循环：在当前任务上进行多步梯度下降
+        for step in range(inner_steps):
+            for inputs, label in task_samples:
+                inputs, label = inputs.to(device), label.to(device)
+                label = label.to(torch.int64)
 
-        for _ in range(inner_steps):
-            optimiser.zero_grad()
+                outputs = model(inputs)
+                loss = loss_fn(outputs, label)
+                loss.backward()
+
+                # 使用SGD优化器进行任务特定更新
+                for param in model.parameters():
+                    param.data -= inner_lr * param.grad
+                    param.grad = None
+
+        # 计算内循环结束后的梯度并累加到元梯度
+        for inputs, label in task_samples:
+            inputs, label = inputs.to(device), label.to(device)
+            label = label.to(torch.int64)
+
             outputs = model(inputs)
             loss = loss_fn(outputs, label)
+            task_loss += loss.item() * inputs.size(0)
             loss.backward()
 
-            for name, param in model.named_parameters():
-                param.data = task_params[name] - inner_lr * param.grad
-                task_params[name] = param.data.clone()
+            _, prediction = torch.max(outputs.data, -1)
+            task_correct += (prediction == label).sum().item()
 
-        outputs = model(inputs)
-        loss = loss_fn(outputs, label)
-        train_loss += loss.item() * inputs.size(0)
-        loss.backward()
+        # 累积任务特定的损失和正确数
+        train_loss += task_loss
+        train_correct += task_correct
 
-        # Outer loop: Meta-update using accumulated gradients
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                if param.grad is None:
-                    param.grad = param.grad.clone()
-                else:
-                    param.grad += param.grad.clone()
-
-        _, prediction = torch.max(outputs.data, -1)
-        train_correct += (prediction == label).sum().item()
-
-    optimiser.step()
-    optimiser.zero_grad()
-
-    for name, param in model.named_parameters():
-        param.data = meta_params[name]
+    # 外循环：使用累积的梯度更新元参数
+    meta_optimiser.step()
 
     return train_loss, train_correct
